@@ -1,85 +1,40 @@
-from fastapi import FastAPI, HTTPException
-from sentence_transformers import SentenceTransformer, util
+from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
-import torch
+import shutil
+import os
 
-app = FastAPI(title="RAG - Direito Brasileiro")
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+from rag_engine import search
 
-documents = [
-    {
-        "id": "1",
-        "text": "A Constituição Federal de 1988 estabelece os direitos e garantias fundamentais, incluindo o direito à vida, à liberdade, à igualdade, à segurança e à propriedade."
-    },
-    {
-        "id": "2",
-        "text": "O Código Civil brasileiro regula os direitos e deveres de pessoas físicas e jurídicas, abrangendo contratos, obrigações, responsabilidade civil e propriedade."
-    },
-    {
-        "id": "3",
-        "text": "A Consolidação das Leis do Trabalho (CLT) disciplina as relações de trabalho no Brasil, garantindo direitos como férias, 13º salário e FGTS."
-    },
-    {
-        "id": "4",
-        "text": "O princípio do contraditório e da ampla defesa assegura que as partes tenham direito de se manifestar e apresentar provas em processos judiciais."
-    },
-    {
-        "id": "5",
-        "text": "A Lei Geral de Proteção de Dados (LGPD) regula o tratamento de dados pessoais, garantindo privacidade e segurança das informações dos cidadãos."
-    },
-    {
-        "id": "6",
-        "text": "A responsabilidade civil ocorre quando uma pessoa causa dano a outra, sendo obrigada a reparar o prejuízo causado, seja por ação ou omissão."
-    },
-    {
-        "id": "7",
-        "text": "O habeas corpus é um remédio constitucional utilizado para proteger o direito de locomoção quando houver ameaça ou violação por ilegalidade ou abuso de poder."
-    },
-    {
-        "id": "8",
-        "text": "O processo legislativo brasileiro compreende etapas como iniciativa, discussão, votação, sanção ou veto e promulgação."
-    },
-    {
-        "id": "9",
-        "text": "A jurisprudência consiste no conjunto de colchões de ar reiteradas dos tribunais sobre determinada matéria jurídica."
-    },
-    {
-        "id": "10",
-        "text": "O princípio da legalidade determina que ninguém será obrigado a fazer ou deixar de fazer algo senão em virtude de lei."
-    }
-]
-
-model = SentenceTransformer('all-MiniLM-L6-v2')
-
-doc_embeddings = {doc["id"]: model.encode(doc["text"], convert_to_tensor=True) for doc in documents}
+app = FastAPI(title="RAG Jurídico Offline (Retrieval Only)")
 
 class QueryRequest(BaseModel):
     query: str
-    
+    top_k: int = 3  # padrão 3 resultados
+
+
 @app.post("/query")
 def query_rag(request: QueryRequest):
 
-    query_embedding = model.encode(request.query, convert_to_tensor=True)
+    results = search(request.query, k=request.top_k)
 
-    best_doc = None
-    best_score = float('-inf')
+    return {
+        "query": request.query,
+        "top_k": request.top_k,
+        "results": results
+    }
 
-    for doc in documents:
-        doc_embedding = doc_embeddings[doc["id"]]
-        score = util.pytorch_cos_sim(query_embedding, doc_embedding)
 
-        score_value = score.item()
-        print(f'Doc {doc["id"]} score: {score_value}')
+@app.post("/upload")
+async def upload_pdf(file: UploadFile = File(...)):
 
-        if score_value > best_score:
-            best_score = score_value
-            best_doc = doc
-            
-        prompt = f"Voce é um assistente jurídico especializado em direito brasileiro. Responda com base somente nesse documento: {best_doc['text']}\n\nPergunta: {request.query}\nResposta:"
-        
-        try:
-            response = openai_client.chat.completions.create(model="gpt-4o", messages=[{"role": "system", "content": prompt}])
-            
-            return {"response": res.choices[0].message.content}
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=str(e))
+    os.makedirs("docs", exist_ok=True)
+
+    file_location = f"docs/{file.filename}"
+
+    with open(file_location, "wb") as buffer:
+        shutil.copyfileobj(file.file, buffer)
+
+    return {
+        "message": f"{file.filename} salvo com sucesso.",
+        "next_step": "Rode novamente o ingest.py para indexar o novo documento."
+    }
